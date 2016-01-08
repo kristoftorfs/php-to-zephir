@@ -87,7 +87,7 @@ class Engine
             }
 
             $phpCode = $codes[$phpFile];
-            $zephirFile = pathinfo($fileName, PATHINFO_DIRNAME) . DIRECTORY_SEPARATOR . pathinfo($fileName, PATHINFO_FILENAME) . '.zep';
+            $zephirFile = pathinfo($phpFile, PATHINFO_DIRNAME) . DIRECTORY_SEPARATOR . pathinfo($fileName, PATHINFO_FILENAME) . '.zep';
             $fileName = basename($phpFile, '.php');
             try {
                 $converted = $this->convertCode($phpCode, $this->classCollector, $logger, $phpFile, $classes);
