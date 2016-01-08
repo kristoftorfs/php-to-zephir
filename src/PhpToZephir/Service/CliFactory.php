@@ -10,6 +10,7 @@
  */
 namespace PhpToZephir\Service;
 
+use PhpToZephir\Application\SingleCommandApplication;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Helper\QuestionHelper;
 use Symfony\Component\Console\Helper\FormatterHelper;
@@ -31,12 +32,12 @@ class CliFactory
     public static function getInstance(OutputInterface $output)
     {
         $questionHelper = new QuestionHelper();
-        $application = new Application('PHP to Zephir Command Line Interface', 'Beta 0.2.1');
+
+        SingleCommandApplication::setSingleCommand(ConvertFactory::getInstance($output));
+
+        $application = new SingleCommandApplication('PHP to Zephir Command Line Interface', 'Beta 0.2.1');
         $application->getHelperSet()->set(new FormatterHelper(), 'formatter');
         $application->getHelperSet()->set($questionHelper, 'question');
-
-        $application->add(ConvertFactory::getInstance($output));
-
         return $application;
     }
 }
