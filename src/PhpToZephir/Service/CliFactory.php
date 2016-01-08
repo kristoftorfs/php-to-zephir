@@ -35,7 +35,7 @@ class CliFactory
 
         SingleCommandApplication::setSingleCommand(ConvertFactory::getInstance($output));
 
-        $application = new SingleCommandApplication('PHP to Zephir Command Line Interface', 'Beta 0.2.1');
+        $application = new SingleCommandApplication('PHP to Zephir Command Line Interface', 'Beta 0.2.2');
         $application->getHelperSet()->set(new FormatterHelper(), 'formatter');
         $application->getHelperSet()->set($questionHelper, 'question');
         return $application;
