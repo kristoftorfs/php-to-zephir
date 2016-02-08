@@ -4,9 +4,13 @@ namespace PhpToZephir\Converter\Printer\Expr;
 
 use PhpToZephir\Converter\Dispatcher;
 use PhpToZephir\Logger;
-use PhpParser\Node;
 use PhpParser\Node\Expr;
+use PhpParser\Node\Stmt;
+use PhpParser\Node\Arg;
+use PhpToZephir\ReservedWordReplacer;
+use PhpToZephir\TypeFinder;
 use PhpToZephir\NodeFetcher;
+use PhpToZephir\Converter\Printer;
 
 class ClosurePrinter
 {
@@ -18,17 +22,50 @@ class ClosurePrinter
      * @var Logger
      */
     private $logger = null;
-
-    private static $converted = array();
+    /**
+     * @var ReservedWordReplacer
+     */
+    private $reservedWordReplacer = null;
+    /**
+     * @var TypeFinder
+     */
+    private $typeFinder = null;
+    /**
+     * @var NodeFetcher
+     */
+    private $nodeFetcher = null;
+    /**
+     * @var string
+     */
+    private $lastMethod = null;
 
     /**
-     * @param Dispatcher $dispatcher
-     * @param Logger     $logger
+     * @param Dispatcher           $dispatcher
+     * @param Logger               $logger
+     * @param ReservedWordReplacer $reservedWordReplacer
+     * @param TypeFinder           $typeFinder
+     * @param NodeFetcher          $nodeFetcher
      */
-    public function __construct(Dispatcher $dispatcher, Logger $logger)
-    {
+    public function __construct(
+        Dispatcher $dispatcher,
+        Logger $logger,
+        ReservedWordReplacer $reservedWordReplacer,
+        TypeFinder $typeFinder,
+        NodeFetcher $nodeFetcher
+    ) {
         $this->dispatcher = $dispatcher;
         $this->logger = $logger;
+        $this->reservedWordReplacer = $reservedWordReplacer;
+        $this->typeFinder = $typeFinder;
+        $this->nodeFetcher = $nodeFetcher;
+    }
+
+    /**
+     * @param string $value
+     */
+    public function setLastMethod($value)
+    {
+        $this->lastMethod = $value;
     }
 
     /**
@@ -46,130 +83,204 @@ class ClosurePrinter
      */
     public function convert(Expr\Closure $node)
     {
-        $methodName = $this->dispatcher->getMetadata()->getClass().$this->dispatcher->getLastMethod();
-        if (isset(self::$converted[$methodName])) {
-            ++self::$converted[$methodName];
-        } else {
-            self::$converted[$methodName] = 1;
-        }
-
-        $name = $methodName.'Closure'.$this->N2L(count(self::$converted[$methodName]));
-
-        $this->logger->logNode(
-            sprintf('Closure does not exist in Zephir, class "%s" with __invoke is created', $name),
+        $types = $this->typeFinder->getTypes(
             $node,
-            $this->dispatcher->getMetadata()->getFullQualifiedNameClass()
+            $this->dispatcher->getMetadata()
         );
-
-        return 'new '.$name.'('.$this->dispatcher->pCommaSeparated($node->uses).')';
-    }
-
-    /**
-     * @param null|string $lastMethod
-     * @param int         $number
-     */
-    public function createClosureClass(Expr\Closure $node, $lastMethod, $number)
-    {
-        $this->logger->trace(__METHOD__.' '.__LINE__, $node, $this->dispatcher->getMetadata()->getFullQualifiedNameClass());
-
-        $name = $this->dispatcher->getMetadata()->getClass().$lastMethod.'Closure'.$this->N2L($number);
-
-        $this->logger->logNode(
-            sprintf('Closure does not exist in Zephir, class "%s" with __invoke is created', $name),
-            $node,
-            $this->dispatcher->getMetadata()->getFullQualifiedNameClass()
-        );
-
-        return array(
-         'name' => $name,
-         'code' => $this->createClass($name, $this->dispatcher->getMetadata()->getNamespace(), $node),
-        );
-    }
-
-    /**
-     * @param string $name
-     * @param string $namespace
-     */
-    private function createClass($name, $namespace, Expr\Closure $node)
-    {
-        $class = "namespace $namespace;
-
-class $name
-{
-";
-
-        foreach ($node->uses as $use) {
-            $class .= '    private '.$use->var.";\n";
+        foreach ($node->params as $param) {
+            if ($param->byRef === true) {
+                $this->logger->logIncompatibility(
+                    'reference',
+                    sprintf('Reference not supported in parametter (var "%s")', $param->name),
+                    $param,
+                    $this->dispatcher->getMetadata()->getClass()
+                );
+            }
         }
 
-        $class .= '
-    public function __construct('.(!empty($node->uses) ? ''.$this->dispatcher->pCommaSeparated($node->uses) : '').')
-    {
-        ';
-        foreach ($node->uses as $use) {
-            $class .= '        let this->'.$use->var.' = '.$use->var.";\n";
+        if ($node->byRef) {
+            $this->logger->logIncompatibility(
+                'reference',
+                'Reference not supported',
+                $node,
+                $this->dispatcher->getMetadata()->getClass()
+            );
         }
-        $class .= '
-    }
 
-    public function __invoke('.$this->dispatcher->pCommaSeparated($node->params).')
-    {'.$this->dispatcher->pStmts($this->convertUseToMemberAttribute($node->stmts, $node->uses)).'
-    }
-}
-    ';
+        $this->dispatcher->setLastMethod($node->name);
 
-        return $class;
+        $stmt = $this->dispatcher->pModifiers($node->type).'function '.$node->name.'(';
+        $varsInMethodSign = array();
+
+        if (isset($types['params']) === true) {
+            $params = array();
+            foreach ($types['params'] as $type) {
+                $varsInMethodSign[] = $type['name'];
+                $stringType = $this->printType($type);
+                $params[] = ((!empty($stringType)) ? $stringType.' ' : '').''.$type['name'].(($type['default'] === null) ? '' : ' = '.$this->dispatcher->p($type['default']));
+            }
+
+            $stmt .= implode(', ', $params);
+        }
+
+        $stmt .= ')';
+        $stmt .= $this->printReturn($node, $types);
+
+        $stmt .= (null !== $node->stmts ? "\n{".$this->printVars($node, $varsInMethodSign).
+                $this->dispatcher->pStmts($node->stmts)."\n}" : ';')."\n";
+
+        return $stmt;
     }
 
     /**
-     * @param Node[]            $node
-     * @param Expr\ClosureUse[] $uses
+     * @param Expr\Closure $node
+     * @param array            $varsInMethodSign
+     *
+     * @return string
      */
-    private function convertUseToMemberAttribute($node, $uses)
+    private function printVars(Expr\Closure $node, array $varsInMethodSign)
+    {
+        $var = '';
+        $vars = array_diff(array_unique(array_filter($this->collectVars($node))), $varsInMethodSign);
+        if (!empty($vars)) {
+            $var .= "\n    var ".implode(', ', $vars).";\n";
+        }
+
+        // dirty...
+        Printer\Expr\ArrayDimFetchPrinter::resetCreatedVars();
+
+        return $var;
+    }
+
+    /**
+     * @param Expr\Closure $node
+     * @param array            $types
+     *
+     * @return string
+     */
+    private function printReturn(Expr\Closure $node, array $types)
+    {
+        $stmt = '';
+        if (array_key_exists('return', $types) === false && $this->hasReturnStatement($node) === false) {
+            $stmt .= ' -> void';
+        } elseif (array_key_exists('return', $types) === true && empty($types['return']['type']['value']) === false) {
+            $stmt .= ' -> '.$this->printType($types['return']);
+        }
+
+        return $stmt;
+    }
+
+    /**
+     * @param Stmt\ClassMethod $nodes
+     *
+     * @return bool
+     */
+    private function hasReturnStatement($nodes)
+    {
+        foreach ($this->nodeFetcher->foreachNodes($nodes) as $nodeData) {
+            $node = $nodeData['node'];
+            if ($node instanceof Stmt\Return_) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param \ArrayIterator|array $node
+     * @param array                $vars
+     *
+     * @return \ArrayIterator|array
+     */
+    private function collectVars($node, array $vars = array())
     {
         $noFetcher = new NodeFetcher();
-        
+
         foreach ($noFetcher->foreachNodes($node) as &$stmt) {
-            if ($stmt['node'] instanceof Expr\Variable) {
-                foreach ($uses as $use) {
-                    if ($use->var === $stmt['node']->name) {
-                        $stmt['node']->name = 'this->'.$stmt['node']->name;
+            if ($stmt['node'] instanceof Expr\Assign) {
+                if (($stmt['node']->var instanceof Expr\PropertyFetch) === false
+                    && ($stmt['node']->var instanceof Expr\StaticPropertyFetch) === false
+                    && ($stmt['node']->var instanceof Expr\ArrayDimFetch) === false
+                    && ($stmt['node']->var instanceof Expr\List_) === false) {
+                    if (is_object($stmt['node']->var->name) === false) { // if true it is a dynamic var
+                        $vars[] = $stmt['node']->var->name;
                     }
+                } elseif (($stmt['node']->var instanceof Expr\List_) === true) {
+                    $varInList = array();
+                    foreach ($stmt['node']->var->vars as $var) {
+                        if (null !== $var) {
+                            $varInList[] = ucfirst($this->dispatcher->p($var));
+                            if (($var instanceof Expr\ArrayDimFetch) === false) {
+                                $vars[] = $this->dispatcher->p($var);
+                            }
+                        }
+                    }
+
+                    $vars[] = 'tmpList' . str_replace(array('[', ']', '"'), '', implode('', $varInList));
+                }
+            } elseif ($stmt['node'] instanceof Stmt\Foreach_) {
+                if (null !== $stmt['node']->keyVar) {
+                    $vars[] = $stmt['node']->keyVar->name;
+                }
+                $vars[] = $stmt['node']->valueVar->name;
+            } elseif ($stmt['node'] instanceof Stmt\For_) {
+                foreach ($stmt['node']->init as $init) {
+                    if ($init instanceof Expr\Assign) {
+                        $vars[] = $init->var->name;
+                    }
+                }
+            } elseif ($stmt['node'] instanceof Stmt\If_) {
+                foreach ($this->nodeFetcher->foreachNodes($stmt['node']->cond) as $nodeData) {
+                    $node = $nodeData['node'];
+                    if ($node instanceof Expr\Array_) {
+                        $vars[] = 'tmpArray'.md5(serialize($node->items));
+                    }
+                }
+            } elseif ($stmt['node'] instanceof Stmt\Catch_) {
+                $vars[] = $stmt['node']->var;
+            } elseif ($stmt['node'] instanceof Stmt\Return_ && $stmt['node']->expr instanceof Expr\Array_) {
+                $vars[] = 'tmpArray'.md5(serialize($stmt['node']->expr->items));
+            } elseif ($stmt['node'] instanceof Stmt\Static_) {
+                foreach ($stmt['node']->vars as $var) {
+                    $vars[] = $var->name;
+                }
+            } elseif ($stmt['node'] instanceof Arg && $stmt['node']->value instanceof Expr\Array_) {
+                $vars[] = 'tmpArray'.md5(serialize($stmt['node']->value->items));
+            }
+
+            if ($stmt['node'] instanceof Expr\ArrayDimFetch && !in_array("PhpParser\Node\Expr\ArrayDimFetch", $stmt['parentClass'])) {
+                $varCreatedInArray = $this->dispatcher->pExpr_ArrayDimFetch($stmt['node'], true);
+                foreach ($varCreatedInArray['vars'] as $var) {
+                    $vars[] = $var;
                 }
             }
         }
 
-        return $node;
+        $vars = array_map(array($this->reservedWordReplacer, 'replace'), $vars);
+
+        return $vars;
     }
 
     /**
-     * @param int $number
+     * @param array $type
+     *
+     * @throws \Exception
+     *
+     * @return string
      */
-    private function N2L($number)
+    private function printType($type)
     {
-        $result = array();
-        $tens = floor($number / 10);
-        $units = $number % 10;
-
-        $words = array(
-            'units' => array('', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eightteen', 'Nineteen'),
-            'tens' => array('', '', 'Twenty', 'Thirty', 'Fourty', 'Fifty', 'Sixty', 'Seventy', 'Eigthy', 'Ninety'),
-        );
-
-        if ($tens < 2) {
-            $result[] = $words['units'][$tens * 10 + $units];
-        } else {
-            $result[] = $words['tens'][$tens];
-
-            if ($units > 0) {
-                $result[count($result) - 1] .= '-'.$words['units'][$units];
-            }
+        if (isset($type['type']) === false) {
+            return '';
+        }
+        if (isset($type['type']['isClass']) === false) {
+            throw new \Exception('isClass not found');
+        }
+        if (isset($type['type']['value']) === false) {
+            throw new \Exception('value not found');
         }
 
-        if (empty($result[0])) {
-            $result[0] = 'Zero';
-        }
-
-        return trim(implode(' ', $result));
+        return ($type['type']['isClass'] === true) ? '<'.$type['type']['value'].'>' : $type['type']['value'];
     }
 }

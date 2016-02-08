@@ -51,7 +51,7 @@ class TypeFinder
      * @param ClassMetadata $classMetadata
      * @retur narray
      */
-    public function getTypes(ClassMethod $node, ClassMetadata $classMetadata)
+    public function getTypes($node, $classMetadata)
     {
         $definition = array();
 
@@ -71,7 +71,7 @@ class TypeFinder
      *
      * @return array
      */
-    private function parseParam(ClassMethod $node, ClassMetadata $classMetadata, array $definition)
+    private function parseParam($node, ClassMetadata $classMetadata, array $definition)
     {
         if (isset($definition['params']) === false) {
             $definition['params'] = array();
@@ -117,7 +117,7 @@ class TypeFinder
      *
      * @return NULL|\phpDocumentor\Reflection\DocBlock
      */
-    private function nodeToDocBlock(ClassMethod $node)
+    private function nodeToDocBlock($node)
     {
         $attribute = $node->getAttributes();
 
@@ -163,7 +163,7 @@ class TypeFinder
      *
      * @return array
      */
-    private function findReturnTag($phpdoc = null, array $definition, ClassMetadata $classMetadata, ClassMethod $node)
+    private function findReturnTag($phpdoc = null, array $definition, ClassMetadata $classMetadata, $node)
     {
         $implements = $classMetadata->getImplements();
         if (is_array($implements) === true) {
